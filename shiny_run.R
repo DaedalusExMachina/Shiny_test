@@ -1,0 +1,505 @@
+#R-Kommentare starten mit '#'
+#Vor erstem Start: Pakete installieren
+
+
+
+#install.packages("shiny")
+#install.packages("dplyr")
+#install.packages("tm")
+#install.packages("tidytext")
+#install.packages("ldatuning")
+#install.packages("topicmodels")
+#install.packages("stringi")
+#install.packages("ggplot2")
+#install.packages("SnowballC")
+#install.packages("tidyr")
+#install.packages("ggdendro")
+#install.packages("plotly")
+#install.packages("Rtsne")
+
+
+library(shiny)
+library(dplyr)
+library(tm)
+library(tidytext)
+library(ldatuning)
+library(topicmodels)
+
+library(stringi)
+library(ggplot2)
+library(SnowballC)
+
+
+
+library(tidyr)
+library(ggdendro)
+library(plotly)
+library(Rtsne)
+
+
+#workingdirectory muss definiert werden
+	
+	setwd("E:/shiny app")
+
+#setting seed for RNG and loading required data
+
+	set.seed(451)
+
+	#loading tm posterior
+	load(file="tm_fit")
+	post <- posterior(tm_fit)
+
+	#loading beta-matrix of tm
+	tm_beta <- read.csv2("beta_topic_terms.csv", header = T)
+
+	#reading gamma-matrix of tm
+	tm_gamma <- read.csv2("gamma_matrix.csv", header=TRUE, stringsAsFactors=FALSE)	
+
+	#loading topic names 
+	topic_names <- read.csv2("topic_desc.csv", header=T) %>% select(-c(topic)) %>% rename(topic=top_name, Topic = top_name_qual)
+	topic_names2 <- read.csv2("topic_desc.csv", header=T) %>% rename(Topic = top_name_qual)
+
+	#reading dictionary
+	tot_dict <- as.vector(t(read.csv2("dictionary.csv", header=T)))
+
+	#reading substitution datafile for cleaning of articles to be mapped
+	sub <- read.csv2("sub_tab.csv", header=TRUE, stringsAsFactors=FALSE)	
+
+	#loading tsne data; may be deleted if tsne figure is not needed
+	tsne_id <- read.csv2("tsne_map_file.csv", header = T) %>% rename(Document = document)
+
+
+	#setting hyperparameters for topic modelling
+
+		k_sub<- 20
+		alpha_sub<-.5
+		beta_sub<-200/(ncol(post$terms))
+
+		ldacontrol <- list(alpha=alpha_sub
+      	                   ,delta = beta_sub
+                   	     	 ,iter = 2000
+                        	 ,burnin = 100                           
+                        	 ,keep = 50
+                       	 	 ,nstart = 1
+                        	 ,best = TRUE
+                         	,seed = 451
+					)
+
+#initial setup of figures, tables and required dataframes
+
+	#beta-tables
+		#setting up table of top 20 terms with highest beta-value for each topic
+			beta_table <- tm_beta %>%	rename(topic=top_name) %>% 
+								left_join(topic_names) %>% 
+								select(-c("X", "topic", "top_desc")) %>% 
+								group_by(Topic) %>%
+								top_n(20, beta) %>% 
+								arrange(Topic, -beta) %>% 
+								filter(beta > .01)
+
+		#determining and concocting the top 5 terms per topic
+		beta_t5 <- beta_table %>% top_n(5, beta) %>% select(-c(beta)) %>% group_by(Topic) %>% dplyr::summarize(top_terms = (paste(term, collapse=", ")))
+
+		#plotting beta_table	
+			beta_plot <- beta_table %>%	mutate(term = reorder_within(term, beta, Topic)) %>%
+  								ggplot(aes(beta, term, fill = factor(Topic))) +
+  								geom_col(show.legend = FALSE) +
+  								facet_wrap(~ Topic, scales = "free") +
+  								scale_y_reordered()+ xlim(0, max(beta_table$beta))
+
+	#gamma-tables
+
+		#identifying top 5 articles with highest gamma for each topic
+		gamma_df <- tm_gamma %>%	left_join(topic_names)	%>% 
+							select(-c("X", "document", "doc_id", "topic")) %>% 
+							group_by(apa) 		%>% 
+							gather(key="bla", value="gamma", 1:as.numeric(k_sub)) %>% 
+							select(-c("bla")) %>% 
+							top_n(1, gamma) %>% 
+							arrange(desc(gamma)) %>% 
+							ungroup() %>% 
+							group_by(Topic) %>% 
+							top_n(5)
+		
+		#identifying top 3 articles with highest gamma, mutating dataframe for visualization purposes
+		gamma_t3 <- gamma_df 	%>%	top_n(3) %>%
+							select("Topic", "apa") %>% 
+							group_by(Topic) %>% 
+							mutate(Rank = paste("Article", row_number(),sep="")) %>%
+							spread(Rank, apa)  %>% 
+							select(1:4)
+							mutate(hi_gamma_art = (paste(Rank, ": ", apa ,"\n"))) %>% 
+							ungroup()
+
+
+	#tsne-stuff
+	
+		#joining tsne-results with topic names
+		plot_df <- tsne_id %>% left_join(topic_names, join_by("topic"))
+
+		#joining plot_df with top 3 articles per topic and top 5 terms per topic
+		plot_df_j <- plot_df %>% left_join(gamma_t3, join_by("Topic")) %>% left_join(beta_t5)
+
+		#generating ellipse plot
+		ellipse_plot <- 	ggplot(plot_df_j, x = dim1, y = dim2, aes(x=dim1, y=dim2, color=Topic, name=Document)) +
+					geom_hline(yintercept=0, linetype="dashed", color="grey")+
+					geom_vline(xintercept=0, linetype="dashed", color="grey")+
+					theme(plot.background= element_rect(fill = "transparent",colour = NA), 
+			   		panel.background = element_rect(fill = "transparent",colour = NA)) + 
+					stat_ellipse(geom="polygon", level=.95, aes(x=dim1, y=dim2, fill=Topic, gt1=Article1, 
+					gt2=Article2, gt3=Article3, bt=top_terms), alpha=.75, inherit.aes=F,  show.legend=F) 
+
+		#transforming ellipse-plot to plotly element
+		ellipse_plotly <- ggplotly(ellipse_plot, tooltip=c("Topic", "Article1", "Article2", "Article3", "top_terms")) %>% layout(hoverlabel = list(align = "left"))
+
+
+		#generating scatter-plot with 1 dot for each article
+		scatter_plot<-	ggplot(plot_df, x = dim1, y = dim2, aes(x=dim1, y=dim2, color=Topic, name=Document)) + 
+					geom_point() + 
+					xlim(min(plot_df$dim1)-2,max(plot_df$dim1)+2) + ylim(min(plot_df$dim2)-2,max(plot_df$dim2)+2) + 
+					geom_hline(yintercept=0, linetype="dashed", color="grey")+
+					geom_vline(xintercept=0, linetype="dashed", color="grey")+
+					theme(plot.background= element_rect(fill = "transparent",colour = NA), 
+			   		panel.background = element_rect(fill = "transparent",colour = NA)) #+ 
+			
+		#transforming scatter-plot to plotly element
+		map_plot<-ggplotly(scatter_plot, tooltip=c("Document", "Topic"))
+	
+
+
+####mapping function
+
+	#declaring variable "text"; first declaration included for testing purposes; initial setup is an empty variable
+
+	text<-"Primary or secondary music directors, college or collaborative music directors, and music educators are trained in music education. Students in music education research and develop new methods for teaching and learning music. Through peer-reviewed publications and instruction at the University of Music for music teachers, students in the field of music conduct their research."
+
+	#setting up empty variable
+	text<-""
+
+	#mapping function
+	text_func <- function(text){	
+		
+		#reading text-input
+		text_df <- data.frame(id="Own Text", text=text)
+		
+		#cleaning and stemming input
+		text_cleaned <- 	text_df 	%>% unnest_tokens(word, text) 
+		text_stemmed <- 	text_cleaned 	%>% 
+					mutate(word=wordStem(word)) 	%>% 
+					rename(term = word) 		%>% 
+					select(-c(id)) 			%>% dplyr::summarise(text = paste0(term, collapse=" "))
+
+		#substituting ngrams in input based on initially loaded substitution dataframe
+		z<-1
+			for(z in 1:nrow(sub)){
+			x<-sub[z,1]
+			y<-sub[z,2]
+			text_stemmed$text <- gsub(paste0("\\b",x,"\\b"), y, text_stemmed$text, perl = TRUE)
+		}
+		
+		#copying cleaned text; irrelevant but useful for testing purposes
+		text_df <- data.frame(doc_id = "own", text = text_stemmed)
+		
+		#mapping the input text based on the tm posterior
+			y <- DataframeSource(text_df)
+			corpy 	<- Corpus(y)
+			tm_dtm_text = DocumentTermMatrix(corpy, control=list(dictionary=tot_dict))
+
+			#getting posterior probabilities
+			post_prob <- posterior(tm_fit, tm_dtm_text, control=ldacontrol)
+			
+			#saving gamma posterior probabilities
+			post_gamma <- as.data.frame(post_prob$topics)
+	
+			#joining post_gamma with topic names and transforming it for output
+			post_trans <-	as.data.frame(t(post_gamma)) %>% 
+						mutate(topic = row_number()) %>% 
+						left_join(topic_names2) %>% 
+						rename(gamma = own) %>% 
+						mutate(perc = gamma*100) %>% 
+						select(c(Topic, perc)) %>% 
+						arrange(desc(perc))	
+ 		
+			#getting top 3 topics of mapped text
+			text_top_topic <- post_trans %>% top_n(3)
+		
+	}
+
+
+#generating ui
+ui	<-	fluidPage(
+		titlePanel("Topic Models of International Research on Digitalisation in Cultural Education"),
+			tabsetPanel(
+				tabPanel("Description of this app", 
+
+					fluidRow("Platzhaltertext für die Beschreibung der App."),
+					fluidRow(
+						column(6, plotOutput("static_map"), align="center"
+						) 
+					),
+					fluidRow(
+						column(4, "Hinweise auf Förderung durch BMBF"
+						),
+						column(4, "MetaKuBi-Logo"
+						)
+					)
+				),
+			
+				tabPanel("Topic Models incl. high beta terms and high gamma articles", 				
+					fluidRow(
+						column(10, plotlyOutput("ellplot"), align="center"
+						)
+					)
+				),
+				tabPanel("Map your own Text", 
+					fluidRow(
+						column(6,
+							textAreaInput("TextInput", label="Your Text here", placeholder="Insert your text here!", value = "", width = NULL, rows=5),
+							actionButton("dobutton", "Map your text"),
+						), 
+
+						column(6, tableOutput("out1")
+						)
+					),
+					fluidRow(style='height:40vh'
+					),
+					fluidRow(
+						column(4, 
+							textOutput("top1_desc")
+						),
+						column(4,
+							textOutput("top2_desc")
+						),
+						column(4,
+							textOutput("top3_desc")
+						)
+					),
+					fluidRow(
+						column(4, 
+							tableOutput("top1_gamma_out")
+						),
+						column(4, 
+							tableOutput("top2_gamma_out")
+						),
+						column(4, 
+							tableOutput("top3_gamma_out")
+						)
+					),
+					fluidRow(
+						column(4, 
+							plotOutput("top1_beta_out")
+						),
+						column(4, 
+							plotOutput("top2_beta_out")
+						),
+						column(4, 
+							plotOutput("top3_beta_out")
+						)
+					)
+				),
+				tabPanel("WiP", 
+					fluidRow(
+						column(10, plotlyOutput("plot1"), align="center"
+						)
+					), 
+					fluidRow(
+						column(4, 
+							selectInput("TopicChoose","Select a Topic", unique(gamma_df$Topic), selected=NULL),
+							textOutput("topic_desc")
+						),
+						column(4,	
+							tableOutput("gamma_art_out")
+						),
+						column(4,
+							plotOutput("high_beta")	
+						)
+					)
+				)
+		)
+)
+	
+
+
+#server side processes and computations
+server <- function(input, output) {
+   
+	#applying mapping function to input text and button click
+	text_map<-eventReactive(input$dobutton,{
+
+		text_map_res <- text_func(input$TextInput)
+	
+	})
+	text_map
+
+	#getting the top 3 topics including descriptions and top articles for the top 3 topics relevant to the mapped text (top[x]_desc_ev, top[x]_gamma_ev, top[x]_beta_ev)
+	top1_desc_ev <- observeEvent(input$dobutton,
+
+		{output$top1_desc <- renderText({
+			
+			t <- text_func(input$TextInput)
+			paste(gamma_df %>% ungroup() %>% filter(Topic == t[1,1]) %>% select(top_desc) %>% unique())
+			})
+			
+		})
+	top1_desc_ev
+
+	top2_desc_ev <- observeEvent(input$dobutton,
+
+		{output$top2_desc <- renderText({
+			
+			t <- text_func(input$TextInput)
+			paste(gamma_df %>% ungroup() %>% filter(Topic == t[2,1]) %>% select(top_desc) %>% unique())
+			})
+			
+		})
+	top2_desc_ev
+
+	top3_desc_ev <- observeEvent(input$dobutton,
+
+		{output$top3_desc <- renderText({
+
+			t <- text_func(input$TextInput)
+			paste(gamma_df %>% ungroup() %>% filter(Topic == t[3,1]) %>% select(top_desc) %>% unique())
+			})
+			
+		})
+	top3_desc_ev
+
+	top1_gamma_ev <- observeEvent(input$dobutton,
+			{output$top1_gamma_out <- renderTable({
+						t <- text_func(input$TextInput)
+						gamma_df %>% ungroup() %>% filter(Topic == t[1,1]) %>% select(apa, gamma) %>% unique()
+						})
+		
+			}
+	)
+	top1_gamma_ev
+
+	top2_gamma_ev <- observeEvent(input$dobutton,
+			{output$top2_gamma_out <- renderTable({
+						t <- text_func(input$TextInput)
+						gamma_df %>% ungroup() %>% filter(Topic == t[2,1]) %>% select(apa, gamma) %>% unique()
+						})
+		
+			}
+	)
+	top2_gamma_ev
+
+	top3_gamma_ev <- observeEvent(input$dobutton,
+			{output$top3_gamma_out <- renderTable({
+						t <- text_func(input$TextInput)
+						gamma_df %>% ungroup() %>% filter(Topic == t[3,1]) %>% select(apa, gamma) %>% unique()
+						})
+		
+			}
+	)
+	top3_gamma_ev
+
+	top1_beta_ev <- observeEvent(input$dobutton,
+
+		{output$top1_beta_out<- renderPlot({
+			t <- text_func(input$TextInput)			
+			beta_table %>% filter(Topic == t[1,1]) %>%
+	  			mutate(term = reorder_within(term, beta, Topic)) %>%
+  				ggplot(aes(beta, term, fill = factor(Topic))) +
+  				geom_col(show.legend = FALSE) +
+	  			facet_wrap(~ Topic, scales = "free") +
+  				scale_y_reordered()
+		})
+	}
+	) 
+
+	top2_beta_ev <- observeEvent(input$dobutton,
+
+		{output$top2_beta_out<- renderPlot({
+			t <- text_func(input$TextInput)			
+			beta_table %>% filter(Topic == t[2,1]) %>%
+	  			mutate(term = reorder_within(term, beta, Topic)) %>%
+  				ggplot(aes(beta, term, fill = factor(Topic))) +
+  				geom_col(show.legend = FALSE) +
+	  			facet_wrap(~ Topic, scales = "free") +
+  				scale_y_reordered()
+		})
+	}
+	) 
+
+	top3_beta_ev <- observeEvent(input$dobutton,
+
+		{output$top3_beta_out<- renderPlot({
+			t <- text_func(input$TextInput)			
+			beta_table %>% filter(Topic == t[3,1]) %>%
+	  			mutate(term = reorder_within(term, beta, Topic)) %>%
+  				ggplot(aes(beta, term, fill = factor(Topic))) +
+  				geom_col(show.legend = FALSE) +
+	  			facet_wrap(~ Topic, scales = "free") +
+  				scale_y_reordered()
+		})
+	}
+	) 
+
+
+	#output function for topic drop down menu; visualizing topic description, top articles and top terms
+	topic_chosen_desc <- eventReactive(input$TopicChoose, 
+
+		{output$topic_desc <- renderText({
+			paste(gamma_df %>%ungroup() %>% filter(Topic == input$TopicChoose) %>% select(top_desc) %>% unique())})
+
+		},ignoreInit=T)
+	topic_chosen_desc
+
+	topic_chosen_highgammaart <- observeEvent(input$TopicChoose,
+
+		{output$gamma_art_out <- renderTable({
+						gamma_df %>% ungroup() %>% filter(Topic == input$TopicChoose) %>% select(apa, gamma) %>% unique()
+					})
+		
+		},ignoreInit=T
+
+	)
+
+	topic_chosen_highbeta <- observeEvent(input$TopicChoose,
+
+		{output$high_beta <- renderPlot({
+						
+		beta_table %>% filter(Topic == input$TopicChoose) %>%
+	  		mutate(term = reorder_within(term, beta, Topic)) %>%
+  			ggplot(aes(beta, term, fill = factor(Topic))) +
+  			geom_col(show.legend = FALSE) +
+	  		facet_wrap(~ Topic, scales = "free") +
+  			scale_y_reordered()
+				
+					})
+		
+				
+
+
+
+		},ignoreInit=T
+
+	)
+
+
+	topic_chosen_highgammaart 
+
+
+	#mapping plots to output elements
+	output$ellplot	<- renderPlotly(ellipse_plotly)
+	output$out1		<- renderTable(text_map())
+	output$plot2	<- renderPlot(beta_plot)
+	output$plot1	<- renderPlotly(map_plot)	
+	output$static_map <- renderPlot(ellipse_plot)
+ 
+}
+	
+
+shinyApp(ui = ui, server = server)	
+
+
+###todo
+
+# ellipsen hover: top article + top words  
+# lösungsmöglichkeiten: 	a) ellipse über mittelpunkte und hauptachsen zeichnen
+#					b) Label der Ellipsen passend beschriften; dafür notwendig: forced new_lines
+
+#dois in top article rein; haben DOI nicht exportiert, daher im Beispiel nicht möglich
+		
